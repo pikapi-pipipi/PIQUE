@@ -1,0 +1,92 @@
+# 视频问题生成任务：video_slice + entity_search 工具配置（不修改项目内任何文件）
+# 通过 run 脚本覆盖：actor_rollout_ref.rollout.multi_turn.tool_config_path 指向此文件
+
+tools:
+  - class_name: "examples.video_question_gen.video_slice_tool.VideoSliceTool"
+    config:
+      type: native
+      # 可选：在此填写远程 API 或本地 vLLM；也可在数据 extra_info.tools_kwargs.video_slice.create_kwargs 中按样本覆盖
+      # 本地 vLLM 示例：api_model 必须与 vLLM 启动时 --model 完全一致（若用路径启动则写完整路径）
+      # 不确定时请请求 GET http://<host>:<port>/v1/models 查看返回的 model id
+      api_base: ""
+      api_key: ""   # 本地 vLLM 可不校验；远程 API 请填写真实 key
+      api_model: ""   # 与 --model 一致
+      scene_threshold: 0.5   # TransNetV2 转场检测阈值，越小越敏感（0.0~1.0）
+      min_scene_len: 10.0     # 最短场景时长（秒），短于此值的场景会被合并到前一个
+    tool_schema:
+      type: "function"
+      function:
+        name: "video_slice"
+        description: "当视频较难理解时调用此工具，由远程大模型对视频进行分段描述，返回 slice1:... slice2:... 等内容，便于继续生成高质量问题。"
+        parameters:
+          type: "object"
+          properties: {}
+          required: []
+
+  - class_name: "examples.video_question_gen.entity_search_tool.EntitySearchTool"
+    config:
+      type: native
+      # 两种模式：
+      # 1) search_mode: "model" 直接调用模型返回相关知识
+      # 2) search_mode: "google" 调用 Google Search API 返回 top5 检索结果
+      search_mode: "model"
+      # 模型模式配置（Qwen3-14B 服务，OpenAI 兼容）
+      api_base: ""
+      api_model: ""
+      api_key: ""
+      max_tokens: 32768
+      timeout: 60
+      # Google 模式配置（Google Custom Search JSON API）
+      google_api_key: ""
+      google_cse_id: ""
+      max_results: 5
+    tool_schema:
+      type: "function"
+      function:
+        name: "entity_search"
+        description: "当从视频画面、对话、文字中识别出 IP 名称、品牌、人物、流行语、专有名词等实体时，使用此工具检索背景知识。支持 model（模型知识）和 google（Google top5）两种模式。"
+        parameters:
+          type: "object"
+          properties:
+            keywords:
+              type: "string"
+              description: "要搜索的关键词，多个用逗号或顿号分隔，如 \"原神, 钟离\" 或 \"鸡你太美\""
+            mode:
+              type: "string"
+              description: "可选。检索模式：model（直接调用模型返回知识）或 google（调用 Google Search API 返回 top5）。不传时使用 config.search_mode。"
+          required:
+            - keywords
+
+  # 在 video_slice / entity_search 之后仍难以生成高质量问题时，可选用 asr / ocr 辅助
+  - class_name: "examples.video_question_gen.asr_tool.ASRTool"
+    config:
+      type: native
+      # 可选：本地 whisper 或远程 ASR API；通过 create_kwargs 可覆盖
+      api_base: ""
+      api_key: ""
+    tool_schema:
+      type: "function"
+      function:
+        name: "asr"
+        description: "当已使用 video_slice 和/或 entity_search 后仍难以生成高质量问题时，可调用此工具。对整段视频的音频进行转录，得到字幕/旁白文本，用于辅助问题生成。"
+        parameters:
+          type: "object"
+          properties: {}
+          required: []
+
+  - class_name: "examples.video_question_gen.ocr_tool.OCRTool"
+    config:
+      type: native
+      # 可选：本地 PaddleOCR 或 VL 服务（如 Qwen3-VL）做 OCR；与 video_slice 共用同一服务即可
+      api_base: ""
+      api_key: ""
+      api_model: ""
+    tool_schema:
+      type: "function"
+      function:
+        name: "ocr"
+        description: "当已使用 video_slice 和/或 entity_search 后仍难以生成高质量问题时，可调用此工具。从视频关键帧中识别出现的文字（字幕、标题、画面内文字），用于辅助问题生成。"
+        parameters:
+          type: "object"
+          properties: {}
+          required: []

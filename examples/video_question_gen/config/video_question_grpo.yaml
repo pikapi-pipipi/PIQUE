@@ -1,0 +1,124 @@
+# 视频问题生成 Agentic RL 主配置
+# 用法：在 run 脚本中 --config-name 指向本 yaml，再通过命令行覆盖 model/data 等
+#
+# 示例启动命令（命令行覆盖）：
+#   python -m verl.trainer.main_ppo \
+#     --config-path examples/video_question_gen/config \
+#     --config-name video_question_grpo \
+#     actor_rollout_ref.model.path=/path/to/model \
+#     actor_rollout_ref.rollout.multi_turn.tool_config_path=/abs/path/to/tool_config.yaml \
+#     data.train_files=/path/to/train.parquet \
+#     data.val_files=/path/to/val.parquet
+
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# ==================== 奖励函数 ====================
+reward:
+  custom_reward_function:
+    path: pkg://examples.video_question_gen.reward_fn
+    name: compute_score
+
+# ==================== 数据 ====================
+data:
+  max_prompt_length: 16384
+  max_response_length: 4096
+  train_batch_size: 8
+  return_raw_chat: true
+
+# ==================== Actor / Rollout / Ref ====================
+actor_rollout_ref:
+  hybrid_engine: true
+
+  model:
+    path: null  # 由 run 脚本覆盖，如 /mnt/models/Qwen3-VL-32B-Thinking
+
+  rollout:
+    name: sglang
+    temperature: 1.0
+    top_p: 0.95
+    top_k: -1
+    n: 4  # GRPO: 每个 prompt 采样 4 条 trajectory
+    tensor_model_parallel_size: 2
+    gpu_memory_utilization: 0.5
+
+    multi_turn:
+      enable: true
+      max_assistant_turns: 5
+      tool_config_path: null  # 由 run 脚本覆盖为绝对路径
+      format: hermes
+
+    agent:
+      default_agent_loop: tool_agent
+      num_workers: 8
+
+  actor:
+    ppo_epochs: 1
+    ppo_mini_batch_size: 4
+    loss_agg_mode: token-mean
+
+# ==================== 算法 ====================
+algorithm:
+  adv_estimator: grpo
+  gamma: 1.0
+  lam: 1.0
+  norm_adv_by_std_in_grpo: true
+  use_kl_in_reward: false
+
+  # ---- 新增：基于大模型的逐步工具调用合理性判断 ----
+  # 在计算 GRPO advantage 前，对 batch 中每条 trajectory 的每步
+  # <think>...</think><tool_call>...</tool_call> 调用大模型判断合理性，
+  # 不合理的步骤 mask 置 0，不参与 advantage / loss 计算。
+  step_level_mask:
+    enable: true
+    # 复用已部署的 Qwen3-VL-32B-Thinking（与 video_slice 工具共用同一服务）
+    base_url: ""
+    model: ""
+    api_key: ""
+    # 单次请求超时（秒），trajectory 较长时适当放大
+    timeout: 180
+    # 每次最多评估的 trajectory 数量，超出则分批；null 表示不限
+    max_batch_size: null
+    # 并发请求数，用于加速批量评估
+    max_concurrency: 8
+    # 判断失败时的回退策略：keep_all（保留全部 mask=1）/ mask_all（全部置 0）
+    fallback_strategy: keep_all
+
+# ==================== Trainer ====================
+trainer:
+  total_epochs: 30
+  total_training_steps: null
+  project_name: video_question_gen
+  experiment_name: grpo_step_mask
+  logger: ["console", "wandb"]
+  log_val_generations: 5
+  nnodes: 1
+  n_gpus_per_node: 8
+  save_freq: 50
+  test_freq: 50
+  val_before_train: true
+  balance_batch: true
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+
+  # 课程学习（可选）：按阶段逐步加入评估维度，奖励连续 N 步无提升则进入下一阶段
+  # 阶段 0: format + safety（权重各 0.5）
+  # 阶段 1: format + extensibility + safety（权重 0.2/0.4/0.4）
+  # 阶段 2: format + extensibility + safety + quality（权重 0.2/0.3/0.2/0.3）
+  curriculum_learning:
+    enabled: true
+    no_improvement_steps_to_advance: 10
+    initial_stage: 0
+    curriculum_module_path: pkg://examples.video_question_gen.curriculum
+    curriculum_manager_class: CurriculumManager
+
+# ==================== Ray ====================
+ray_kwargs:
+  ray_init:
+    runtime_env:
+      env_vars:
+        PYTHONPATH: null  # 由 run 脚本覆盖
